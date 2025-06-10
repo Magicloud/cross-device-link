@@ -1,0 +1,3 @@
+[build]
+rustflags = ["-Zlocation-detail=none"]
+target = ["x86_64-unknown-linux-musl"]

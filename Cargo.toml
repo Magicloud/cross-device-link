@@ -1,0 +1,38 @@
+[package]
+name = "cross-device-link"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "cdl"
+path = "src/main.rs"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
+
+[dependencies]
+eyre = { version = "*" }
+color-eyre = { version = "*" }
+tracing-error = { version = "*" }
+clap = { version = "*", features = ["derive"] }
+inotify = {version = "*"}
+serde = { version = "*", features = ["derive"] }
+csv = { version = "*" }
+tarpc = { version = "*", features = ["serde-transport-bincode", "unix", "tcp"] }
+tokio-serde = { version = "*", features = ["bincode"] }
+tokio = { version = "*", features = ["rt-multi-thread", "macros", "fs", "process", "sync", "signal", "time"] }
+futures = { version = "*" }
+iter-opt-filter = { version = "*" }
+async-trait = { version = "*" }
+# tailcall = { version = "*" }
+tracing = { version = "*" }
+tracing-subscriber = { version = "*", features = ["env-filter"] }
+# tracing-opentelemetry = { version = "*" }
+# opentelemetry_sdk = { version = "*", features = ["rt-tokio"] }
+# opentelemetry-semantic-conventions = { version = "*" }
+# opentelemetry = { version = "*" }
+# opentelemetry-otlp = { version = "*" }
