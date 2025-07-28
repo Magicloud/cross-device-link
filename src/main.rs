@@ -268,7 +268,7 @@ async fn serv(cli: Cli) -> Result<()> {
             Ok(true) => (), // file exists
             Ok(false) => {
                 tracing::info!("DB file does not exist. Create empty one");
-                fs::write(&cli.db, b"").await?; // file not exist, create empty
+                fs::write(&cli.db, b"[]").await?; // file not exist, create empty
             }
             Err(e) => Err(e)?, // cannot check
         }
@@ -282,23 +282,21 @@ async fn serv(cli: Cli) -> Result<()> {
 
     tracing::debug!("Load records");
     let x: Result<_> = try {
-        let records = csv::Reader::from_path(&cli.db)?
-            .deserialize()
-            .collect::<Result<Vec<Record>, csv::Error>>()?
-            .into_iter()
-            .map(async |r| try {
-                (
-                    r.clone(),
-                    FromTo {
-                        from: inotify
-                            .watches()
-                            .add(&r.src_dst.from, *SRC_MASK.get().unwrap())?, // Oncecell is set at the beginning
-                        to: inotify
-                            .watches()
-                            .add(&r.src_dst.to, *DST_MASK.get().unwrap())?, // Oncecell is set at the beginning
-                    },
-                )
-            });
+        let v = tokio::fs::read(&cli.db).await?;
+        let v: Vec<Record> = serde_json::from_slice(&v)?;
+        let records = v.into_iter().map(async |r| try {
+            (
+                r.clone(),
+                FromTo {
+                    from: inotify
+                        .watches()
+                        .add(&r.src_dst.from, *SRC_MASK.get().unwrap())?, // Oncecell is set at the beginning
+                    to: inotify
+                        .watches()
+                        .add(&r.src_dst.to, *DST_MASK.get().unwrap())?, // Oncecell is set at the beginning
+                },
+            )
+        });
         let records: Result<_> = try_join_all(records).await; // Why this cannot be replaced with JoinSet due to inotify outlive?
         Arc::new(RwLock::new(Arc::new(HashMap::from_iter(records?))))
     };

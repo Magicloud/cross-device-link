@@ -36,3 +36,21 @@ pub enum SuccOrFail {
         error: String,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serde_record() {
+        let r = Record {
+            src_dst: FromTo {
+                from: "/root/a".into(),
+                to: "/tmp/a".into(),
+            },
+            user: 0,
+            group: 0,
+        };
+        eprintln!("{:?}", serde_json::to_string_pretty(&r));
+    }
+}

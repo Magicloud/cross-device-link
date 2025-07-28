@@ -21,7 +21,8 @@ tracing-error = { version = "*" }
 clap = { version = "*", features = ["derive"] }
 inotify = {version = "*"}
 serde = { version = "*", features = ["derive"] }
-csv = { version = "*" }
+# csv = { version = "*" } // CSV does not work well with `flatten`
+serde_json = { version = "*" }
 tarpc = { version = "*", features = ["serde-transport-bincode", "unix", "tcp"] }
 tokio-serde = { version = "*", features = ["bincode"] }
 tokio = { version = "*", features = ["rt-multi-thread", "macros", "fs", "process", "sync", "signal", "time"] }

@@ -99,13 +99,10 @@ impl CdlMsg for Server {
             tracing::debug!("Dropped write lock");
 
             tracing::info!("Persisting in-mem DB");
-            let mut csv = csv::Writer::from_path(self.db)?;
-            self.records
-                .get_cloned()
-                .await
-                .keys()
-                .map(|r| csv.serialize(r).map_err(|e| anyhow!("{e:?}")))
-                .collect::<Result<Vec<_>>>()?;
+            let tmp = self.records.get_cloned().await;
+            let v: Vec<_> = tmp.keys().collect();
+            let v = serde_json::to_vec_pretty(&v)?;
+            tokio::fs::write(&self.db, &v).await?;
         };
         x.map_err(|e| format!("{e:?}"))
     }
@@ -199,13 +196,10 @@ impl CdlMsg for Server {
                 .await;
 
             tracing::info!("Persisting in-mem DB");
-            let mut csv = csv::Writer::from_path(self.db)?;
-            self.records
-                .get_cloned()
-                .await
-                .keys()
-                .map(|r| csv.serialize(r).map_err(|e| anyhow!("{e:?}")))
-                .collect::<Result<Vec<_>>>()?;
+            let tmp = self.records.get_cloned().await;
+            let v: Vec<_> = tmp.keys().collect();
+            let v = serde_json::to_vec_pretty(&v)?;
+            tokio::fs::write(&self.db, &v).await?;
             ret
         };
         ret.map_err(|e| format!("{e:?}"))

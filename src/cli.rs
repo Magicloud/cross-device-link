@@ -18,7 +18,7 @@ pub enum SubCmd {
 }
 #[derive(Parser, Debug)]
 pub struct Cli {
-    #[arg(long, global = true, default_value = "/etc/cross-device-link.csv")]
+    #[arg(long, global = true, default_value = "/etc/cross-device-link.json")]
     pub db: PathBuf,
     #[arg(
         long,
