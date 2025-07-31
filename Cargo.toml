@@ -1,6 +1,6 @@
 [package]
 name = "cross-device-link"
-version = "0.1.0"
+version = "2025.7.32"
 edition = "2024"
 
 [[bin]]
@@ -19,7 +19,8 @@ eyre = { version = "*" }
 color-eyre = { version = "*" }
 tracing-error = { version = "*" }
 clap = { version = "*", features = ["derive"] }
-inotify = {version = "*"}
+inotify = {version = "*"} # // Inotify does not work most of the time. The WD, after some storing/passing, becomes invalid for unknown reason.
+# wtr-watcher = { version = "*" }
 serde = { version = "*", features = ["derive"] }
 # csv = { version = "*" } // CSV does not work well with `flatten`
 serde_json = { version = "*" }

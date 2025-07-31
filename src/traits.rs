@@ -1,4 +1,5 @@
 use tokio::sync::RwLock;
+use tracing::instrument;
 
 pub trait BoolToResult<T, E> {
     fn to_result(self, o: T, e: E) -> Result<T, E>;
@@ -21,6 +22,7 @@ impl<T> GetCloned<T> for RwLock<T>
 where
     T: Clone + Send + Sync + std::fmt::Debug,
 {
+    #[instrument(level = "debug")]
     async fn get_cloned(&self) -> T {
         tracing::debug!("Getting read lock");
         let read_lock = self.read().await;

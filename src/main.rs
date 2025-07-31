@@ -198,7 +198,7 @@ async fn serv_syncing(
     Ok(())
 }
 
-#[instrument(level = "debug")]
+// #[instrument(level = "debug")]
 async fn serv_watching(
     inotify: &mut Inotify,
     w2s_tx: &mpsc::Sender<WatchDescriptor>,
@@ -238,8 +238,11 @@ async fn serv_watching(
                     }),
             ),
             InotifyActions::Del(ref r) => {
+                tracing::debug!("a");
                 let wds = records.get_cloned().await;
+                tracing::debug!("b");
                 let wds = wds.get(r).unwrap();
+                tracing::debug!("c");
                 InotifyResults::Del(
                     inotify
                         .watches()

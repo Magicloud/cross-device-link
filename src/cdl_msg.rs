@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, ops::Not, path::PathBuf, sync::Arc};
 
 use eyre::{Result, anyhow};
 use inotify::WatchDescriptor;
@@ -43,18 +43,16 @@ impl CdlMsg for Server {
         group: u32,
     ) -> Result<(), String> {
         let x: Result<()> = try {
-            if self
-                .records
+            self.records
                 .get_cloned()
                 .await
                 .iter()
                 .any(|(r, _)| r.src_dst.to == dst)
-            {
-                Err(anyhow!(
-                    "The target {} is already in sync",
-                    dst.to_string_lossy()
-                ))?
-            }
+                .not()
+                .to_result(
+                    (),
+                    anyhow!("The target {} is already in sync", dst.to_string_lossy()),
+                )?;
 
             tracing::info!("Syncing file");
             Command::new("cp")
@@ -164,22 +162,31 @@ impl CdlMsg for Server {
                     async move {
                         let ret: Result<()> = try {
                             tracing::info!("Handling {r:?}");
-                            tracing::info!("Deleting from Inotify");
-                            let (tx, rx) = oneshot::channel();
-                            i.send((InotifyActions::Del(r.clone()), tx)).await?;
-                            if let InotifyResults::Del(ir) = rx.await? {
-                                ir?;
+
+                            let inotify_result: Result<()> = try {
+                                tracing::info!("Deleting from Inotify");
+                                let (tx, rx) = oneshot::channel();
+                                i.send((InotifyActions::Del(r.clone()), tx)).await?;
+                                if let InotifyResults::Del(ir) = rx.await? {
+                                    ir?;
+                                };
                             };
 
-                            // tokio::fs::remove_file(y.dst.clone()).await?;
-                            tracing::info!("Deleting from in-mem DB");
                             tracing::debug!("Getting write lock");
                             let mut lock = records.write().await;
                             tracing::debug!("Got write lock");
-                            Arc::get_mut(&mut lock)
-                                .ok_or(anyhow!("Records are occupied"))?
-                                .remove(&r);
-                            drop(lock);
+                            tracing::info!("Deleting from in-mem DB");
+                            if let Some(rs) = Arc::get_mut(&mut lock) {
+                                rs.remove(&r);
+                                inotify_result?;
+                            } else {
+                                if let Err(e) = inotify_result {
+                                    Err(anyhow!("{e:?} and records are occupied"))?;
+                                } else {
+                                    Err(anyhow!("Records are occupied"))?;
+                                };
+                            }
+
                             tracing::debug!("Dropped write lock");
                         };
                         match ret {
