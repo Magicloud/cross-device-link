@@ -1,6 +1,5 @@
+use eyre::Result;
 use std::path::PathBuf;
-
-use inotify::WatchDescriptor;
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq, Hash, Clone)]
 pub struct FromTo<T> {
@@ -8,24 +7,30 @@ pub struct FromTo<T> {
     pub to: T,
 }
 
+pub type UID = u32;
+pub type GID = u32;
+
 #[derive(Debug)]
 pub enum InotifyActions {
-    Add(FromTo<PathBuf>),
-    Del(Record), // Sending a WatchDescriptor over channel seems breaking the Rust data and underneath C data. Inotify would say invalid argument (unknown watch descriptor).
+    Add(Record),
+    Del(FromTo<Option<PathBuf>>, u32),
+    List,
+    Stop,
 }
 
 #[derive(Debug)]
 pub enum InotifyResults {
-    Add(std::io::Result<FromTo<WatchDescriptor>>),
-    Del(std::io::Result<()>),
+    Add(Result<()>),
+    Del(Result<Vec<SuccOrFail>>),
+    List(Vec<Record>),
 }
 
 #[derive(serde::Deserialize, serde::Serialize, PartialEq, Eq, Hash, Debug, Clone)]
 pub struct Record {
     #[serde(flatten)]
     pub src_dst: FromTo<PathBuf>,
-    pub user: u32,
-    pub group: u32,
+    pub user: UID,
+    pub group: GID,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]

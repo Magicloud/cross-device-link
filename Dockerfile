@@ -1,16 +1,17 @@
-FROM rust:latest AS builder
+# FROM rust:latest AS builder
 
-# COPY --exclude=target . /code
-ADD . /code
-WORKDIR /code
-ENV HTTPS_PROXY=http://192.168.0.102:8080
-RUN cargo build
+# # COPY --exclude=target . /code
+# ADD . /code
+# WORKDIR /code
+# ENV HTTPS_PROXY=http://192.168.0.102:8080
+# RUN cargo build
 
 
-FROM debian:bookworm
+# FROM debian:bookworm
+FROM alpine:latest
 
-# ADD ./target/x86_64-unknown-linux-musl/debug/cdl /cdl
-COPY --from=builder /code/target/debug/cdl /cdl
+ADD ./target/x86_64-unknown-linux-musl/debug/cdl /cdl
+# COPY --from=builder /code/target/debug/cdl /cdl
 
 RUN adduser --disabled-password test
 

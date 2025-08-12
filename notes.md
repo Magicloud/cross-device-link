@@ -1,5 +1,3 @@
-Bugs:
+TODO:
 
-
-- all `?` handling
-- add/del server side log
+- Persist records

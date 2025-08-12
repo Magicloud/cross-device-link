@@ -216,7 +216,7 @@ checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 
 [[package]]
 name = "cross-device-link"
-version = "2025.7.32"
+version = "2025.8.12"
 dependencies = [
  "async-trait",
  "clap",
@@ -225,6 +225,7 @@ dependencies = [
  "futures",
  "inotify",
  "iter-opt-filter",
+ "oneshot",
  "serde",
  "serde_json",
  "tarpc",
@@ -551,6 +552,12 @@ name = "once_cell_polyfill"
 version = "1.70.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4895175b425cb1f87721b59f0f286c2092bd4af812243672510e1ac53e2e0ad"
+
+[[package]]
+name = "oneshot"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ce411919553d3f9fa53a0880544cda985a112117a0444d5ff1e870a893d6ea"
 
 [[package]]
 name = "opentelemetry"

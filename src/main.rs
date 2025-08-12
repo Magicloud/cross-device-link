@@ -1,4 +1,5 @@
 #![feature(try_blocks)]
+#![feature(iterator_try_collect)]
 
 mod cdl_msg;
 mod cli;
@@ -7,27 +8,25 @@ mod types;
 
 use clap::Parser;
 use eyre::{Result, anyhow};
-use futures::{
-    StreamExt,
-    future::{ready, try_join_all},
-};
+use futures::{StreamExt, future::ready};
 use inotify::{Inotify, WatchDescriptor, WatchMask};
+use iter_opt_filter::IteratorOptionalFilterExt;
 use std::{
-    collections::HashMap, io::ErrorKind, os::unix::fs::PermissionsExt, path::Path, process::exit,
-    sync::Arc, time::Duration,
+    collections::HashMap,
+    io::ErrorKind,
+    ops::ControlFlow,
+    os::unix::{fs::PermissionsExt, process::CommandExt},
+    path::Path,
+    process::exit,
+    sync::{mpsc, mpsc as oneshot},
+    thread,
+    time::Duration,
 };
 use tarpc::{
     client, context,
     server::{self, Channel},
 };
-use tokio::{
-    fs,
-    process::Command,
-    signal,
-    sync::{OnceCell, RwLock, mpsc, oneshot},
-    task::JoinSet,
-    time::sleep,
-};
+use tokio::{fs, process::Command, signal, sync::OnceCell};
 use tokio_serde::formats::Bincode;
 use tracing::instrument;
 use tracing_error::ErrorLayer;
@@ -75,10 +74,10 @@ async fn main() -> Result<()> {
         }
         _ => {
             tracing::debug!("Init client");
-            let me: u32 = String::from_utf8(Command::new("id").arg("-u").output().await?.stdout)?
+            let me: UID = String::from_utf8(Command::new("id").arg("-u").output().await?.stdout)?
                 .trim()
                 .parse()?;
-            let grp: u32 = String::from_utf8(Command::new("id").arg("-g").output().await?.stdout)?
+            let grp: GID = String::from_utf8(Command::new("id").arg("-g").output().await?.stdout)?
                 .trim()
                 .parse()?;
             let uds = tarpc::serde_transport::unix::connect(&cli.uds, Bincode::default)
@@ -160,62 +159,67 @@ async fn serv_cli(uds: &Path, server: &Server) -> Result<()> {
 }
 
 #[instrument(level = "debug")]
-async fn serv_syncing(
-    w2s_rx: &mut mpsc::Receiver<WatchDescriptor>,
-    records: Arc<RwLock<Arc<HashMap<Record, FromTo<WatchDescriptor>>>>>,
-) -> Result<()> {
-    if let Some(wd) = w2s_rx.recv().await {
-        tracing::debug!("From watcher: {wd:?}");
-        if let Some((r, _)) = records
-            .get_cloned()
-            .await
-            .iter()
-            .find(|&(_, wds)| wds.to == wd.clone() || wds.from == wd.clone())
-        {
-            Command::new("cp")
-                .uid(r.user)
-                .gid(r.group)
-                .args([
-                    "-f",
+async fn serv_syncing(w2s_rx: &mut mpsc::Receiver<Record>) -> Result<()> {
+    if let Ok(r) = w2s_rx.try_recv() {
+        tracing::debug!("From watcher: {r:?}");
+        Command::new("cp")
+            .uid(r.user)
+            .gid(r.group)
+            .args([
+                "-f",
+                &r.src_dst.from.to_string_lossy(),
+                &r.src_dst.to.to_string_lossy(),
+            ])
+            .status()
+            .await?
+            .success()
+            .to_result(
+                (),
+                anyhow!(
+                    "Failed sync from {} to {} as {}",
                     &r.src_dst.from.to_string_lossy(),
                     &r.src_dst.to.to_string_lossy(),
-                ])
-                .status()
-                .await?
-                .success()
-                .to_result(
-                    (),
-                    anyhow!(
-                        "Failed sync from {} to {} as {}",
-                        &r.src_dst.from.to_string_lossy(),
-                        &r.src_dst.to.to_string_lossy(),
-                        &r.user
-                    ),
-                )?;
-            tracing::info!("Synced file {}", r.src_dst.to.to_string_lossy());
-        }
+                    &r.user
+                ),
+            )?;
+        tracing::info!("Synced file {}", r.src_dst.to.to_string_lossy());
+    } else {
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
     Ok(())
 }
 
 // #[instrument(level = "debug")]
-async fn serv_watching(
+// This fn runs in thread and should not block.
+fn serv_watching(
     inotify: &mut Inotify,
-    w2s_tx: &mpsc::Sender<WatchDescriptor>,
+    w2s_tx: &mpsc::Sender<Record>,
     comm_rx: &mut mpsc::Receiver<(InotifyActions, oneshot::Sender<InotifyResults>)>,
-    records: Arc<RwLock<Arc<HashMap<Record, FromTo<WatchDescriptor>>>>>,
-) -> Result<()> {
-    let mut event_buf = [0; 1024];
+    records: &mut HashMap<Record, FromTo<WatchDescriptor>>,
+) -> Result<ControlFlow<()>> {
+    let mut event_buf = [0; 1024]; // Move out of the loop?
     match inotify.read_events(&mut event_buf) {
         Ok(events) => {
             tracing::info!("Inotify events: {events:?}");
             for event in events {
-                let x = format!("{:?}", event.wd);
-                w2s_tx.send(event.wd).await?;
-                tracing::debug!("To watcher: {x}");
+                records
+                    .extract_if(|_, v| v.from == event.wd || v.to == event.wd)
+                    .next()
+                    .map(|(k, v)| {
+                        let FromTo { from, to } = v;
+                        inotify.watches().remove(to)?;
+                        if let Err(e) = w2s_tx.send(k.clone()) {
+                            tracing::warn!("To Sync failed: {e:?}");
+                        };
+                        let to = inotify
+                            .watches()
+                            .add(k.src_dst.to.clone(), *SRC_MASK.get().unwrap())?;
+                        records.insert(k.clone(), FromTo { from, to });
+                        Ok(()) as Result<()>
+                    });
             }
         }
-        Err(e) if e.kind() == ErrorKind::WouldBlock => sleep(Duration::from_millis(1)).await,
+        Err(e) if e.kind() == ErrorKind::WouldBlock => (),
         x => {
             x?;
         }
@@ -223,49 +227,91 @@ async fn serv_watching(
     if let Ok((ia, res)) = comm_rx.try_recv() {
         tracing::info!("Process actions: {ia:?}");
         let ir = match ia {
-            InotifyActions::Add(FromTo { ref from, ref to }) => InotifyResults::Add(
-                inotify
-                    .watches()
-                    .add(from, *SRC_MASK.get().unwrap())
-                    .and_then(|s_wd| {
-                        inotify
-                            .watches()
-                            .add(to, *DST_MASK.get().unwrap())
-                            .map(|d_wd| FromTo {
-                                from: s_wd,
-                                to: d_wd,
-                            })
-                    }),
-            ),
-            InotifyActions::Del(ref r) => {
-                tracing::debug!("a");
-                let wds = records.get_cloned().await;
-                tracing::debug!("b");
-                let wds = wds.get(r).unwrap();
-                tracing::debug!("c");
-                InotifyResults::Del(
-                    inotify
+            InotifyActions::Add(ref r) => {
+                let result = try {
+                    std::process::Command::new("cp")
+                        .uid(r.user)
+                        .gid(r.group)
+                        .args([
+                            "-f",
+                            &r.src_dst.from.to_string_lossy(),
+                            &r.src_dst.to.to_string_lossy(),
+                        ])
+                        .status()?
+                        .success()
+                        .to_result(
+                            (),
+                            anyhow!(
+                                "Failed sync from {} to {} as {}",
+                                &r.src_dst.from.to_string_lossy(),
+                                &r.src_dst.to.to_string_lossy(),
+                                &r.user
+                            ),
+                        )?;
+
+                    let from = inotify
                         .watches()
-                        .remove(wds.from.clone())
-                        .and_then(|_| inotify.watches().remove(wds.to.clone())),
-                )
+                        .add(&r.src_dst.from, *SRC_MASK.get().unwrap())?;
+                    let to = inotify
+                        .watches()
+                        .add(&r.src_dst.to, *DST_MASK.get().unwrap())?;
+                    records.insert(r.clone(), FromTo { from, to });
+                };
+                InotifyResults::Add(result)
             }
+            InotifyActions::Del(ref r, me) => {
+                let to_dels: HashMap<Record, FromTo<WatchDescriptor>> = records
+                    .iter()
+                    .filter(|(r, _)| r.user == me)
+                    .optional_filter(r.from.clone().map(|s| {
+                        let s = s.clone();
+                        move |&(r, _): &(&Record, _)| r.src_dst.from == s
+                    }))
+                    .optional_filter(r.to.clone().map(|d| {
+                        let d = d.clone();
+                        move |&(r, _): &(&Record, _)| r.src_dst.to == d
+                    }))
+                    .map(|(k, v)| (k.clone(), v.clone())) // How to eliminate this to have `to_dels` be refs? It would borrow records and prevents later `remove`.
+                    .collect();
+                let result = to_dels
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let result: Result<()> = try {
+                            // TODO: Maybe better to have both errors returned.
+                            inotify.watches().remove(v.from)?;
+                            inotify.watches().remove(v.to)?;
+                            records.remove(&k);
+                        };
+                        match result {
+                            Ok(_) => SuccOrFail::Succ(k.src_dst.clone()),
+                            Err(e) => SuccOrFail::Fail {
+                                filenames: k.src_dst.clone(),
+                                error: format!("{e:?}"),
+                            },
+                        }
+                    })
+                    .collect();
+                InotifyResults::Del(Ok(result))
+            }
+            InotifyActions::List => {
+                InotifyResults::List(records.keys().map(|x| x.clone()).collect())
+            }
+            InotifyActions::Stop => return Ok(ControlFlow::Break(())), // This is so ugly
         };
         let x = format!("{ir:?}");
         res.send(ir)
             .map_err(|x| anyhow!("Failed to send response {x:?} for {ia:?}"))?;
+        drop(res); // Simulate oneshot
         tracing::info!("Actions results: {x}");
-    } else {
-        sleep(Duration::from_millis(1)).await
     }
 
-    Ok(())
+    Ok(ControlFlow::Continue(()))
 }
 
 #[instrument(level = "debug")]
 async fn serv(cli: Cli) -> Result<()> {
     tracing::info!("Server starts");
-    let mut tasks = Vec::new(); // replace the whole part with tokio-shutdown/tokio-graceful?
+    let mut tasks = Vec::new();
     let x: Result<_> = try {
         match fs::try_exists(&cli.db).await {
             Ok(true) => (), // file exists
@@ -287,83 +333,27 @@ async fn serv(cli: Cli) -> Result<()> {
     let x: Result<_> = try {
         let v = tokio::fs::read(&cli.db).await?;
         let v: Vec<Record> = serde_json::from_slice(&v)?;
-        let records = v.into_iter().map(async |r| try {
-            (
-                r.clone(),
-                FromTo {
-                    from: inotify
-                        .watches()
-                        .add(&r.src_dst.from, *SRC_MASK.get().unwrap())?, // Oncecell is set at the beginning
-                    to: inotify
-                        .watches()
-                        .add(&r.src_dst.to, *DST_MASK.get().unwrap())?, // Oncecell is set at the beginning
-                },
-            )
-        });
-        let records: Result<_> = try_join_all(records).await; // Why this cannot be replaced with JoinSet due to inotify outlive?
-        Arc::new(RwLock::new(Arc::new(HashMap::from_iter(records?))))
+        v
     };
     let records = x.unwrap_or_else(|e| {
         tracing::error!("Loading records error: {e:?}");
         exit(1);
     });
 
-    // Initial sync to have all dsts in place. This cannot be parallel with inotify watching as it would trigger it.
-    records
-        .get_cloned()
-        .await
-        .iter()
-        .map(|(r, _)| {
-            let r = r.clone();
-            async move {
-                let x: Result<_> = try {
-                    if !tokio::fs::try_exists(&r.src_dst.to).await?
-                        && tokio::fs::try_exists(&r.src_dst.from).await?
-                        && !Command::new("cp")
-                            .uid(r.user)
-                            .gid(r.group)
-                            .args([
-                                "-f",
-                                &r.src_dst.from.to_string_lossy(),
-                                &r.src_dst.to.to_string_lossy(),
-                            ])
-                            .status()
-                            .await?
-                            .success()
-                    {
-                        // SRC exists, DST does not exist, copying over failed
-                        Err(anyhow!(
-                            "Failed sync from {} to {} as {}",
-                            &r.src_dst.from.to_string_lossy(),
-                            &r.src_dst.to.to_string_lossy(),
-                            &r.user
-                        ))?
-                    }
-                };
-                if let Err(e) = x {
-                    tracing::warn!("Initial syncing error: {e:?}");
-                };
-            }
-        })
-        .collect::<JoinSet<_>>()
-        .join_all()
-        .await;
-
     // Communication between Cli and Inotify
     let (comm_tx, mut comm_rx) =
-        mpsc::channel::<(InotifyActions, oneshot::Sender<InotifyResults>)>(8);
+        mpsc::channel::<(InotifyActions, oneshot::Sender<InotifyResults>)>();
 
     // CLI interface
-    let r = records.clone();
     let u = cli.uds.clone();
+    let c = comm_tx.clone();
     let h = tokio::spawn(async move {
         serv_cli(
             &u,
             &Server {
                 // Maybe move this out of the spawn and just borrow? I wonder borrowed one still `serv`.
                 db: cli.db,
-                records: r,
-                inotify_request: comm_tx,
+                inotify_request: c,
             },
         )
         .await
@@ -371,12 +361,11 @@ async fn serv(cli: Cli) -> Result<()> {
     tasks.push(h);
 
     // Watcher to Syncing
-    let (w2s_tx, mut w2s_rx) = tokio::sync::mpsc::channel::<WatchDescriptor>(256);
+    let (w2s_tx, mut w2s_rx) = mpsc::channel::<Record>();
     // Syncing
-    let r = records.clone();
     let h = tokio::spawn(async move {
         loop {
-            if let Err(e) = serv_syncing(&mut w2s_rx, r.clone()).await {
+            if let Err(e) = serv_syncing(&mut w2s_rx).await {
                 tracing::warn!("Syncing error: {e:?}");
             }
         }
@@ -384,21 +373,35 @@ async fn serv(cli: Cli) -> Result<()> {
     tasks.push(h);
 
     // Watching
-    let h = tokio::spawn(async move {
+    thread::spawn(move || {
+        let mut hm: HashMap<Record, FromTo<WatchDescriptor>> = HashMap::new();
         loop {
-            if let Err(e) =
-                serv_watching(&mut inotify, &w2s_tx, &mut comm_rx, records.clone()).await
-            {
-                tracing::warn!("Watching error: {e:?}");
+            match serv_watching(&mut inotify, &w2s_tx, &mut comm_rx, &mut hm) {
+                Err(e) => tracing::warn!("Watching error: {e:?}"),
+                Ok(ControlFlow::Break(_)) => break,
+                Ok(ControlFlow::Continue(_)) => (),
             }
         }
     });
-    tasks.push(h);
+
+    // Looping records to add syncs
+    records
+        .into_iter()
+        .map(|r| {
+            let (tx, rx) = oneshot::channel();
+            comm_tx.send((InotifyActions::Add(r), tx))?;
+            drop(rx);
+            Ok(()) as Result<()>
+        })
+        .try_collect::<Vec<_>>()?;
 
     tracing::info!("All tasks running");
     signal::ctrl_c().await?; // Block until SIGINT
     tracing::info!("Server ending");
 
+    let (tx, rx) = oneshot::channel();
+    comm_tx.send((InotifyActions::Stop, tx))?;
+    drop(rx);
     for t in tasks {
         t.abort();
     }

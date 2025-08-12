@@ -1,6 +1,6 @@
 [package]
 name = "cross-device-link"
-version = "2025.7.32"
+version = "2025.8.12"
 edition = "2024"
 
 [[bin]]
@@ -25,6 +25,7 @@ serde = { version = "*", features = ["derive"] }
 # csv = { version = "*" } // CSV does not work well with `flatten`
 serde_json = { version = "*" }
 tarpc = { version = "*", features = ["serde-transport-bincode", "unix", "tcp"] }
+oneshot = { version = "*" }
 tokio-serde = { version = "*", features = ["bincode"] }
 tokio = { version = "*", features = ["rt-multi-thread", "macros", "fs", "process", "sync", "signal", "time"] }
 futures = { version = "*" }
