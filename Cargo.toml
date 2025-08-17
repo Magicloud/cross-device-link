@@ -29,7 +29,7 @@ oneshot = { version = "*" }
 tokio-serde = { version = "*", features = ["bincode"] }
 tokio = { version = "*", features = ["rt-multi-thread", "macros", "fs", "process", "sync", "signal", "time"] }
 futures = { version = "*" }
-iter-opt-filter = { version = "*" }
+# iter-opt-filter = { version = "*" }
 async-trait = { version = "*" }
 # tailcall = { version = "*" }
 tracing = { version = "*" }

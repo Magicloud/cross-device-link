@@ -10,11 +10,10 @@ use clap::Parser;
 use eyre::{Result, anyhow};
 use futures::{StreamExt, future::ready};
 use inotify::{Inotify, WatchDescriptor, WatchMask};
-use iter_opt_filter::IteratorOptionalFilterExt;
 use std::{
     collections::HashMap,
+    fs::File,
     io::ErrorKind,
-    ops::ControlFlow,
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::Path,
     process::exit,
@@ -196,8 +195,8 @@ fn serv_watching(
     w2s_tx: &mpsc::Sender<Record>,
     comm_rx: &mut mpsc::Receiver<(InotifyActions, oneshot::Sender<InotifyResults>)>,
     records: &mut HashMap<Record, FromTo<WatchDescriptor>>,
-) -> Result<ControlFlow<()>> {
-    let mut event_buf = [0; 1024]; // Move out of the loop?
+) -> Result<LoopCtrl> {
+    let mut event_buf = [0; 32]; // TODO: Move out of the loop?
     match inotify.read_events(&mut event_buf) {
         Ok(events) => {
             tracing::info!("Inotify events: {events:?}");
@@ -205,8 +204,7 @@ fn serv_watching(
                 records
                     .extract_if(|_, v| v.from == event.wd || v.to == event.wd)
                     .next()
-                    .map(|(k, v)| {
-                        let FromTo { from, to } = v;
+                    .map(|(k, FromTo { from, to })| {
                         inotify.watches().remove(to)?;
                         if let Err(e) = w2s_tx.send(k.clone()) {
                             tracing::warn!("To Sync failed: {e:?}");
@@ -214,6 +212,8 @@ fn serv_watching(
                         let to = inotify
                             .watches()
                             .add(k.src_dst.to.clone(), *SRC_MASK.get().unwrap())?;
+                        // Find then insert involves mutable borrow records while it is still borrowed.
+                        // Wonder if there is a solution without the extract.
                         records.insert(k.clone(), FromTo { from, to });
                         Ok(()) as Result<()>
                     });
@@ -224,11 +224,13 @@ fn serv_watching(
             x?;
         }
     };
-    if let Ok((ia, res)) = comm_rx.try_recv() {
+    let ret = if let Ok((ia, res)) = comm_rx.try_recv() {
         tracing::info!("Process actions: {ia:?}");
-        let ir = match ia {
-            InotifyActions::Add(ref r) => {
+        let ir = match &ia {
+            InotifyActions::Add(r) => {
                 let result = try {
+                    // Logically, this blocking is necesssary. The watches must be added after file is synced.
+                    // But, if the file is large, we may need a queue to continue process in next loop.
                     std::process::Command::new("cp")
                         .uid(r.user)
                         .gid(r.group)
@@ -259,35 +261,27 @@ fn serv_watching(
                 };
                 InotifyResults::Add(result)
             }
-            InotifyActions::Del(ref r, me) => {
-                let to_dels: HashMap<Record, FromTo<WatchDescriptor>> = records
-                    .iter()
-                    .filter(|(r, _)| r.user == me)
-                    .optional_filter(r.from.clone().map(|s| {
-                        let s = s.clone();
-                        move |&(r, _): &(&Record, _)| r.src_dst.from == s
-                    }))
-                    .optional_filter(r.to.clone().map(|d| {
-                        let d = d.clone();
-                        move |&(r, _): &(&Record, _)| r.src_dst.to == d
-                    }))
-                    .map(|(k, v)| (k.clone(), v.clone())) // How to eliminate this to have `to_dels` be refs? It would borrow records and prevents later `remove`.
-                    .collect();
-                let result = to_dels
+            InotifyActions::Del(r, me) => {
+                let result = records
+                    .extract_if(|k, _| {
+                        k.user == *me
+                            && (Some(k.src_dst.from.clone()) == r.from
+                                || Some(k.src_dst.to.clone()) == r.to)
+                    })
+                    .collect::<Vec<_>>()
                     .into_iter()
                     .map(|(k, v)| {
-                        let result: Result<()> = try {
-                            // TODO: Maybe better to have both errors returned.
-                            inotify.watches().remove(v.from)?;
-                            inotify.watches().remove(v.to)?;
-                            records.remove(&k);
-                        };
-                        match result {
-                            Ok(_) => SuccOrFail::Succ(k.src_dst.clone()),
-                            Err(e) => SuccOrFail::Fail {
+                        let f = inotify.watches().remove(v.from.clone());
+                        let t = inotify.watches().remove(v.to.clone());
+                        if f.is_err() || t.is_err() {
+                            let ret = SuccOrFail::Fail {
                                 filenames: k.src_dst.clone(),
-                                error: format!("{e:?}"),
-                            },
+                                error: format!("From {f:?}, To {t:?}"),
+                            };
+                            records.insert(k, v);
+                            ret
+                        } else {
+                            SuccOrFail::Succ(k.src_dst.clone())
                         }
                     })
                     .collect();
@@ -296,16 +290,24 @@ fn serv_watching(
             InotifyActions::List => {
                 InotifyResults::List(records.keys().map(|x| x.clone()).collect())
             }
-            InotifyActions::Stop => return Ok(ControlFlow::Break(())), // This is so ugly
+            InotifyActions::Stop => InotifyResults::List(vec![]), // return Ok(LoopCtrl::Break), // This is so ugly
         };
-        let x = format!("{ir:?}");
-        res.send(ir)
-            .map_err(|x| anyhow!("Failed to send response {x:?} for {ia:?}"))?;
-        drop(res); // Simulate oneshot
-        tracing::info!("Actions results: {x}");
-    }
+        match ia {
+            InotifyActions::Add(_) | InotifyActions::Del(_, _) => {
+                let x = format!("{ir:?}");
+                res.send(ir)
+                    .map_err(|x| anyhow!("Failed to send response {x:?} for {ia:?}"))?;
+                tracing::info!("Actions results: {x}");
+                LoopCtrl::ContinuePersist
+            }
+            InotifyActions::Stop => LoopCtrl::Break,
+            InotifyActions::List => LoopCtrl::Continue,
+        }
+    } else {
+        LoopCtrl::Continue
+    };
 
-    Ok(ControlFlow::Continue(()))
+    Ok(ret)
 }
 
 #[instrument(level = "debug")]
@@ -352,7 +354,6 @@ async fn serv(cli: Cli) -> Result<()> {
             &u,
             &Server {
                 // Maybe move this out of the spawn and just borrow? I wonder borrowed one still `serv`.
-                db: cli.db,
                 inotify_request: c,
             },
         )
@@ -373,13 +374,25 @@ async fn serv(cli: Cli) -> Result<()> {
     tasks.push(h);
 
     // Watching
+    // In original async design, WatchDescriptor may become invalid for no apparent reason.
+    // I suspect that it should not be Send/Sync.
+    // Now have it within a thread.
     thread::spawn(move || {
         let mut hm: HashMap<Record, FromTo<WatchDescriptor>> = HashMap::new();
         loop {
             match serv_watching(&mut inotify, &w2s_tx, &mut comm_rx, &mut hm) {
                 Err(e) => tracing::warn!("Watching error: {e:?}"),
-                Ok(ControlFlow::Break(_)) => break,
-                Ok(ControlFlow::Continue(_)) => (),
+                Ok(LoopCtrl::Break) => break,
+                Ok(LoopCtrl::Continue) => (),
+                Ok(LoopCtrl::ContinuePersist) => {
+                    let x: Result<()> = try {
+                        let file = File::open(&cli.db)?;
+                        serde_json::to_writer_pretty(file, &(hm.keys().collect::<Vec<_>>()))?;
+                    };
+                    if let Err(e) = x {
+                        tracing::warn!("Cannot persist records to file as {e:?}");
+                    }
+                }
             }
         }
     });

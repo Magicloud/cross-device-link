@@ -42,6 +42,12 @@ pub enum SuccOrFail {
     },
 }
 
+pub enum LoopCtrl {
+    Break,
+    Continue,
+    ContinuePersist,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
