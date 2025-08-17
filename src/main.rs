@@ -195,9 +195,9 @@ fn serv_watching(
     w2s_tx: &mpsc::Sender<Record>,
     comm_rx: &mut mpsc::Receiver<(InotifyActions, oneshot::Sender<InotifyResults>)>,
     records: &mut HashMap<Record, FromTo<WatchDescriptor>>,
+    event_buf: &mut [u8],
 ) -> Result<LoopCtrl> {
-    let mut event_buf = [0; 32]; // TODO: Move out of the loop?
-    match inotify.read_events(&mut event_buf) {
+    match inotify.read_events(event_buf) {
         Ok(events) => {
             tracing::info!("Inotify events: {events:?}");
             for event in events {
@@ -379,8 +379,9 @@ async fn serv(cli: Cli) -> Result<()> {
     // Now have it within a thread.
     thread::spawn(move || {
         let mut hm: HashMap<Record, FromTo<WatchDescriptor>> = HashMap::new();
+        let mut event_buf = [0; 32]; // TODO: Move out of the loop?
         loop {
-            match serv_watching(&mut inotify, &w2s_tx, &mut comm_rx, &mut hm) {
+            match serv_watching(&mut inotify, &w2s_tx, &mut comm_rx, &mut hm, &mut event_buf) {
                 Err(e) => tracing::warn!("Watching error: {e:?}"),
                 Ok(LoopCtrl::Break) => break,
                 Ok(LoopCtrl::Continue) => (),
